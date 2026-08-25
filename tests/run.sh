@@ -5,6 +5,9 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hremote-test.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# Keep the generated config inside the disposable HOME on every runner.
+unset XDG_CONFIG_HOME HREMOTE_CONFIG
+
 fail() {
   printf 'test: %s\n' "$*" >&2
   exit 1
