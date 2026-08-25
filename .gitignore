@@ -1,0 +1,3 @@
+# Generated per-project configuration is intentionally local-only.
+config/*.conf
+!config/hremote.conf.example

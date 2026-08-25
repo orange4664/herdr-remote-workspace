@@ -1,0 +1,9 @@
+# Generated installations use the same shell configuration format.
+# Keep real paths and SSH targets outside version control.
+LOCAL_PATH=/absolute/path/to/project
+SSH_TARGET=ssh-config-alias
+REMOTE_PATH='~/work/project'
+SYNC_NAME=project-sync
+HERDR_SESSION=project-session
+IGNORE_PATHS=(.DS_Store .venv .tmpbin)
+REMOTE_SYMLINKS=()

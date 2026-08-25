@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE=${HREMOTE_CONFIG:-${XDG_CONFIG_HOME:-${HOME:+"$HOME/.config"}}/hremote/config}
+DRY_RUN=false
+SETUP_ONLY=false
+SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=10)
+
+usage() {
+  cat <<'EOF'
+Usage: hremote [--config FILE] [--dry-run | --setup-only]
+
+  --config FILE  Read a specific generated project config
+  --dry-run      Validate local configuration without connecting or writing
+  --setup-only   Configure and validate without opening the Herdr TUI
+  --help         Show this help
+EOF
+}
+
+die() {
+  printf 'hremote: %s\n' "$*" >&2
+  exit 1
+}
+
+require_value() {
+  [[ $# -ge 2 && -n $2 ]] || die "$1 requires a value"
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --config)
+      require_value "$@"
+      CONFIG_FILE=$2
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --setup-only)
+      SETUP_ONLY=true
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+[[ $DRY_RUN != true || $SETUP_ONLY != true ]] || die '--dry-run and --setup-only cannot be combined'
+
+[[ -f $CONFIG_FILE ]] || die "config not found: $CONFIG_FILE"
+
+LOCAL_PATH=
+SSH_TARGET=
+REMOTE_PATH=
+SYNC_NAME=
+HERDR_SESSION=
+IGNORE_PATHS=()
+REMOTE_SYMLINKS=()
+# The generated config is mode 600 and owned by the invoking user.
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+[[ -n ${LOCAL_PATH:-} && $LOCAL_PATH == /* && -d $LOCAL_PATH ]] || die 'LOCAL_PATH must be an existing absolute directory'
+[[ ${SSH_TARGET:-} =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'SSH_TARGET is invalid'
+[[ ${REMOTE_PATH:-} =~ ^(~\/|\/)[A-Za-z0-9._\/-]+$ ]] || die 'REMOTE_PATH is invalid'
+[[ ${SYNC_NAME:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'SYNC_NAME is invalid'
+[[ ${HERDR_SESSION:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'HERDR_SESSION is invalid'
+
+remote_path_tail=${REMOTE_PATH#~/}
+remote_path_tail=${remote_path_tail#/}
+IFS=/ read -r -a remote_path_parts <<<"$remote_path_tail"
+for part in "${remote_path_parts[@]}"; do
+  [[ -n $part && $part != . && $part != .. ]] || die 'REMOTE_PATH contains an invalid component'
+done
+
+for command_name in ssh mutagen herdr python3; do
+  command -v "$command_name" >/dev/null 2>&1 || die "required command not found: $command_name"
+done
+
+for mapping in "${REMOTE_SYMLINKS[@]-}"; do
+  [[ -n $mapping ]] || continue
+  [[ $mapping == *=* ]] || die "invalid REMOTE_SYMLINKS entry: $mapping"
+  link_path=${mapping%%=*}
+  link_target=${mapping#*=}
+  [[ $link_path =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || die "invalid remote symlink path: $link_path"
+  [[ $link_target =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+|/\.\.|/\.)*$|^(\.\.?/)+[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || die "invalid remote symlink target: $link_target"
+
+  IFS=/ read -r -a link_parts <<<"$link_path"
+  for part in "${link_parts[@]}"; do
+    [[ $part != . && $part != .. ]] || die "invalid remote symlink path: $link_path"
+  done
+  depth=$((${#link_parts[@]} - 1))
+  IFS=/ read -r -a target_parts <<<"$link_target"
+  for part in "${target_parts[@]}"; do
+    case $part in
+      .) ;;
+      ..)
+        (( depth > 0 )) || die "remote symlink target escapes the project root: $mapping"
+        (( depth -= 1 )) || true
+        ;;
+      *) (( depth += 1 )) || true ;;
+    esac
+  done
+
+  mapping_is_ignored=false
+  for ignore_path in "${IGNORE_PATHS[@]-}"; do
+    [[ ${ignore_path#/} == "$link_path" ]] && mapping_is_ignored=true
+  done
+  [[ $mapping_is_ignored == true ]] || die "remote symlink path must also be ignored by Mutagen: $link_path"
+done
+
+if [[ $DRY_RUN == true ]]; then
+  printf 'Configuration and local dependencies are valid.\n'
+  printf 'Would verify SSH, synchronize with two-way-safe semantics, prepare the remote workspace, and attach Herdr.\n'
+  printf 'No files, synchronization sessions, or remote objects were changed.\n'
+  exit 0
+fi
+
+ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" true >/dev/null \
+  || die 'key-only SSH validation failed'
+
+inspect_sync() {
+  local session_json=$1
+  local require_healthy=$2
+  printf '%s' "$session_json" | python3 -c '
+import json, sys
+
+local_path, ssh_target, remote_path, sync_name, require_healthy, *expected_ignores = sys.argv[1:]
+try:
+    sessions = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeError):
+    raise SystemExit("hremote: Mutagen returned malformed session data")
+if not isinstance(sessions, list):
+    raise SystemExit("hremote: Mutagen returned an unexpected session data shape")
+matches = [item for item in sessions if isinstance(item, dict) and item.get("name") == sync_name]
+if not matches:
+    print("missing")
+    raise SystemExit
+if len(matches) != 1:
+    print("mismatch")
+    raise SystemExit
+
+session = matches[0]
+alpha = session.get("alpha")
+beta = session.get("beta")
+ignore = session.get("ignore")
+symlink = session.get("symlink")
+if not all(isinstance(value, dict) for value in (alpha, beta, ignore, symlink)):
+    raise SystemExit("hremote: the named Mutagen session has incomplete configuration")
+user, separator, host = ssh_target.rpartition("@")
+if not separator:
+    user, host = "", ssh_target
+
+matches = (
+    alpha.get("protocol") == "local"
+    and alpha.get("path") == local_path
+    and alpha.get("host", "") == ""
+    and alpha.get("user", "") == ""
+    and alpha.get("port", 0) == 0
+    and not alpha.get("environment")
+    and not alpha.get("parameters")
+    and beta.get("protocol") == "ssh"
+    and beta.get("host") == host
+    and beta.get("user", "") == user
+    and beta.get("port", 0) == 0
+    and beta.get("path") == remote_path
+    and not beta.get("environment")
+    and not beta.get("parameters")
+    and session.get("mode") == "two-way-safe"
+    and symlink.get("mode") == "portable"
+    and ignore.get("vcs") is True
+)
+actual_ignores = ignore.get("paths")
+normalize = lambda value: value[1:] if value.startswith("/") else value
+if not isinstance(actual_ignores, list):
+    matches = False
+else:
+    actual_ignores = [normalize(value) for value in actual_ignores if isinstance(value, str)]
+    expected_ignores = [normalize(value) for value in expected_ignores]
+    matches = matches and len(actual_ignores) == len(expected_ignores) and set(actual_ignores) == set(expected_ignores)
+if not matches:
+    print("mismatch")
+    raise SystemExit
+
+needs_resume = session.get("paused") is True or alpha.get("connected") is not True or beta.get("connected") is not True
+if require_healthy == "yes":
+    if needs_resume or alpha.get("scanned") is not True or beta.get("scanned") is not True:
+        raise SystemExit("hremote: the named Mutagen session is not healthy")
+    if session.get("lastError") or session.get("conflicts") or session.get("excludedConflicts", 0):
+        raise SystemExit("hremote: the named Mutagen session reports errors or conflicts")
+    for endpoint in (alpha, beta):
+        if endpoint.get("scanProblems") or endpoint.get("excludedScanProblems", 0):
+            raise SystemExit("hremote: the named Mutagen session reports scan problems")
+        if endpoint.get("transitionProblems") or endpoint.get("excludedTransitionProblems", 0):
+            raise SystemExit("hremote: the named Mutagen session reports transition problems")
+print("resume" if needs_resume else "ready")
+' "$LOCAL_PATH" "$SSH_TARGET" "$REMOTE_PATH" "$SYNC_NAME" "$require_healthy" "${IGNORE_PATHS[@]-}"
+}
+
+session_json=$(mutagen sync list --template '{{ json . }}') \
+  || die 'unable to inspect the configured Mutagen session'
+session_state=$(inspect_sync "$session_json" no) \
+  || die 'unable to validate Mutagen session metadata'
+
+case $session_state in
+  missing)
+    ;;
+  resume)
+    mutagen sync resume "$SYNC_NAME" >/dev/null
+    ;;
+  ready)
+    ;;
+  *)
+    die 'a Mutagen session with this name has different endpoints; inspect it and choose another name'
+    ;;
+esac
+
+if [[ $REMOTE_PATH == "~/"* ]]; then
+  remote_home=$(ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'printf "%s\n" "$HOME"') \
+    || die 'unable to resolve the remote home directory'
+  [[ $remote_home == /* && $remote_home != *$'\n'* ]] || die 'remote host returned an invalid home directory'
+  [[ $remote_home != *[^A-Za-z0-9._/-]* ]] || die 'remote home directory cannot be passed safely'
+  remote_root=$remote_home/${REMOTE_PATH:2}
+else
+  remote_root=$REMOTE_PATH
+fi
+
+ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$remote_root" <<'REMOTE_MKDIR' \
+  || die 'unable to create the remote project directory'
+set -eu
+remote_root=$1
+case $remote_root in
+  /*) ;;
+  *) printf 'invalid remote root\n' >&2; exit 2 ;;
+esac
+mkdir -p -- "$remote_root"
+REMOTE_MKDIR
+[[ $remote_root == /* && $remote_root != *$'\n'* ]] || die 'remote host returned an invalid project directory'
+[[ $remote_root != *[^A-Za-z0-9._/-]* ]] || die 'remote project directory cannot be passed safely'
+
+if [[ $session_state == missing ]]; then
+  create_args=(
+    sync create
+    --name "$SYNC_NAME"
+    --no-global-configuration
+    --mode=two-way-safe
+    --symlink-mode=portable
+    --ignore-vcs
+  )
+  for ignore_path in "${IGNORE_PATHS[@]-}"; do
+    [[ -n $ignore_path ]] || continue
+    create_args+=(--ignore "$ignore_path")
+  done
+  create_args+=("$LOCAL_PATH" "$SSH_TARGET:$REMOTE_PATH")
+  mutagen "${create_args[@]}"
+fi
+
+mutagen sync flush "$SYNC_NAME" \
+  || die 'Mutagen flush failed; inspect the session for conflicts before continuing'
+
+session_json=$(mutagen sync list --template '{{ json . }}') \
+  || die 'unable to inspect Mutagen state after flush'
+inspect_sync "$session_json" yes >/dev/null \
+  || die 'Mutagen is not healthy after flush; inspect conflicts and endpoint problems'
+
+for mapping in "${REMOTE_SYMLINKS[@]-}"; do
+  [[ -n $mapping ]] || continue
+  link_path=${mapping%%=*}
+  link_target=${mapping#*=}
+  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$remote_root" "$link_path" "$link_target" <<'REMOTE_LINK'
+set -eu
+remote_root=$1
+link_path=$2
+link_target=$3
+case $remote_root in
+  /*) ;;
+  *) printf 'invalid remote root\n' >&2; exit 2 ;;
+esac
+link_abs=$remote_root/$link_path
+if [ -L "$link_abs" ]; then
+  [ "$(readlink "$link_abs")" = "$link_target" ] || {
+    printf 'unexpected symlink target at %s\n' "$link_path" >&2
+    exit 3
+  }
+elif [ -e "$link_abs" ]; then
+  printf 'refusing to replace non-link object at %s\n' "$link_path" >&2
+  exit 4
+else
+  mkdir -p -- "$(dirname "$link_abs")"
+  ln -s -- "$link_target" "$link_abs"
+fi
+REMOTE_LINK
+done
+
+if ! ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'command -v herdr >/dev/null || test -x "$HOME/.local/bin/herdr"'; then
+  printf 'Remote Herdr is not bootstrapped yet. The interactive attach will install the matching remote component.\n' >&2
+  printf 'Exit after bootstrap, then run hremote again to create the project workspace.\n' >&2
+  exec herdr --remote "$SSH_TARGET" --session "$HERDR_SESSION"
+fi
+
+remote_herdr_command() {
+  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$HERDR_SESSION" "$@" <<'REMOTE_HERDR'
+set -eu
+session_name=$1
+shift
+herdr_bin=$(command -v herdr 2>/dev/null || true)
+if [ -z "$herdr_bin" ] && [ -x "$HOME/.local/bin/herdr" ]; then
+  herdr_bin=$HOME/.local/bin/herdr
+fi
+[ -n "$herdr_bin" ] || { printf 'remote Herdr executable not found\n' >&2; exit 5; }
+exec "$herdr_bin" --session "$session_name" "$@"
+REMOTE_HERDR
+}
+
+local_herdr_version=$(herdr --version) || die 'unable to read the local Herdr version'
+remote_herdr_version=$(remote_herdr_command --version) || die 'unable to read the remote Herdr version'
+[[ $local_herdr_version == "$remote_herdr_version" ]] || die 'local and remote Herdr versions do not match'
+expected_server_version=${local_herdr_version#herdr }
+
+parse_server_status() {
+  python3 -c '
+import json, sys
+expected_version = sys.argv[1]
+payload = json.load(sys.stdin)
+status = payload.get("status") if isinstance(payload, dict) else None
+if status == "not_running" and payload.get("running") is False:
+    print("stopped")
+elif status == "running" and payload.get("running") is True and payload.get("compatible") is True and payload.get("version") == expected_version:
+    print("running")
+else:
+    raise SystemExit("hremote: remote Herdr returned invalid or incompatible server status")
+' "$expected_server_version"
+}
+
+server_json=$(remote_herdr_command status server --json) || die 'unable to inspect the remote Herdr server'
+server_state=$(printf '%s' "$server_json" | parse_server_status)
+if [[ $server_state == stopped ]]; then
+  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$HERDR_SESSION" <<'REMOTE_SERVER'
+set -eu
+session_name=$1
+herdr_bin=$(command -v herdr 2>/dev/null || true)
+if [ -z "$herdr_bin" ] && [ -x "$HOME/.local/bin/herdr" ]; then
+  herdr_bin=$HOME/.local/bin/herdr
+fi
+[ -n "$herdr_bin" ] || { printf 'remote Herdr executable not found\n' >&2; exit 5; }
+mkdir -p "$HOME/.config/herdr"
+nohup "$herdr_bin" --session "$session_name" server \
+  >"$HOME/.config/herdr/hremote-server.log" 2>&1 </dev/null &
+REMOTE_SERVER
+
+  server_state=stopped
+  for _ in {1..50}; do
+    sleep 0.1
+    server_json=$(remote_herdr_command status server --json) || continue
+    server_state=$(printf '%s' "$server_json" | parse_server_status) || continue
+    [[ $server_state == running ]] && break
+  done
+  [[ $server_state == running ]] || die 'remote Herdr server did not become ready'
+fi
+
+workspace_label=hremote-$HERDR_SESSION
+workspace_json=$(remote_herdr_command workspace list)
+workspace_id=$(printf '%s' "$workspace_json" | python3 -c '
+import json, re, sys
+label = sys.argv[1]
+payload = json.load(sys.stdin)
+result = payload.get("result") if isinstance(payload, dict) else None
+workspaces = result.get("workspaces") if isinstance(result, dict) else None
+if not isinstance(workspaces, list):
+    raise SystemExit("hremote: remote Herdr returned malformed workspace data")
+matches = [workspace for workspace in workspaces if isinstance(workspace, dict) and workspace.get("label") == label]
+if not matches:
+    print("missing")
+elif len(matches) != 1:
+    raise SystemExit("hremote: multiple remote workspaces use the configured label")
+else:
+    workspace_id = matches[0].get("workspace_id")
+    if not isinstance(workspace_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]+", workspace_id):
+        raise SystemExit("hremote: remote Herdr returned an invalid workspace identifier")
+    print(workspace_id)
+' "$workspace_label")
+
+if [[ $workspace_id == missing ]]; then
+  remote_herdr_command workspace create --cwd "$remote_root" --label "$workspace_label" --focus >/dev/null
+  workspace_json=$(remote_herdr_command workspace list)
+  workspace_id=$(printf '%s' "$workspace_json" | python3 -c '
+import json, sys
+label = sys.argv[1]
+payload = json.load(sys.stdin)
+matches = [item for item in payload.get("result", {}).get("workspaces", []) if item.get("label") == label]
+if len(matches) != 1:
+    raise SystemExit("hremote: remote workspace was not visible after creation")
+print(matches[0]["workspace_id"])
+' "$workspace_label")
+fi
+[[ $workspace_id =~ ^[A-Za-z0-9._:-]+$ ]] || die 'remote Herdr returned an invalid workspace identifier'
+
+pane_json=$(remote_herdr_command pane list --workspace "$workspace_id") \
+  || die 'unable to inspect the remote Herdr workspace'
+printf '%s' "$pane_json" | python3 -c '
+import json, sys
+workspace_id, expected_cwd = sys.argv[1:]
+payload = json.load(sys.stdin)
+panes = payload.get("result", {}).get("panes")
+if not isinstance(panes, list) or not any(
+    isinstance(pane, dict)
+    and pane.get("workspace_id") == workspace_id
+    and pane.get("cwd") == expected_cwd
+    for pane in panes
+):
+    raise SystemExit("hremote: configured workspace has an unexpected working directory")
+' "$workspace_id" "$remote_root"
+
+remote_herdr_command workspace focus "$workspace_id" >/dev/null
+
+if [[ $SETUP_ONLY == true ]]; then
+  printf 'hremote: setup and validation complete; no TUI was opened.\n'
+  exit 0
+fi
+
+exec herdr --remote "$SSH_TARGET" --session "$HERDR_SESSION"
