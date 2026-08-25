@@ -4,6 +4,6 @@ LOCAL_PATH=/absolute/path/to/project
 SSH_TARGET=ssh-config-alias
 REMOTE_PATH='~/work/project'
 SYNC_NAME=project-sync
-HERDR_SESSION=project-session
+# Legacy configs may contain HERDR_SESSION; the launcher ignores that field.
 IGNORE_PATHS=(.DS_Store .venv .tmpbin)
 REMOTE_SYMLINKS=()

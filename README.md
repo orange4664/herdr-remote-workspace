@@ -2,7 +2,8 @@
 
 Run Herdr as a local thin client while Herdr terminals execute on an SSH host
 against a Mutagen-synchronized project copy. The package is project-neutral:
-real paths, SSH aliases, and session names live only in a generated local config.
+real paths, SSH aliases, and synchronization names live only in a generated
+local config. The Herdr session is selected for each launcher invocation.
 
 ```text
 local project -- Mutagen two-way-safe --> SSH host project copy
@@ -37,7 +38,6 @@ Clone the repository, review the scripts, and run a dry run with explicit values
   --ssh-target ssh-config-alias \
   --remote-path '~/work/project' \
   --sync-name project-sync \
-  --session-name project-session \
   --dry-run
 ```
 
@@ -55,7 +55,6 @@ multiple servers or projects behind the same command, install a named profile:
   --ssh-target second-ssh-alias \
   --remote-path '~/work/second-project' \
   --sync-name second-project-sync \
-  --session-name second-project-session \
   --profile second
 ```
 
@@ -80,10 +79,10 @@ edit startup files. Verify with `command -v hremote` in a fresh shell.
 Preview launcher validation without SSH or writes:
 
 ```bash
-hremote --dry-run
+hremote --session project-session --dry-run
 ```
 
-Then run `hremote`. It performs these steps in order:
+Then run `hremote --session project-session`. It performs these steps in order:
 
 1. validates the generated config and local dependencies;
 2. verifies key-only SSH access and creates the configured remote directory;
@@ -97,29 +96,38 @@ Then run `hremote`. It performs these steps in order:
    project workspace, and attaches the local thin client.
 
 On the first run, Herdr may need an interactive attach to bootstrap its matching
-remote component. Exit after bootstrap and run `hremote` again so it can create
-the project-rooted workspace.
+remote component. Exit after bootstrap and run
+`hremote --session project-session` again so it can create the project-rooted
+workspace with the same selected session.
+
+`--session NAME` is the only non-interactive way to select a Herdr session. If
+it is omitted while standard input and standard error are attached to a
+terminal, `hremote` prompts for a non-empty validated name with no default. If
+either stream is not a terminal, omission fails before SSH, Mutagen, or Herdr is
+run. This includes pipelines, redirected input, and unattended jobs.
 
 List configured profile names without displaying their SSH targets or paths,
 then select one by name:
 
 ```bash
 hremote --list-profiles
-hremote --profile second --dry-run
-hremote --profile second
+hremote --session second-session --profile second --dry-run
+hremote --session second-session --profile second
 ```
 
 `--profile` and `--config` are mutually exclusive. Without either option,
 `hremote` keeps loading the original default config (including
 `HREMOTE_CONFIG`, when set). Each profile supplies its own SSH target, remote
-path, Mutagen synchronization name, and Herdr session name. The same endpoint
-and synchronization-policy checks run after selection, so a same-named Mutagen
-session with different endpoints remains a fail-closed error.
+path, and Mutagen synchronization name; profiles do not select a Herdr session.
+Legacy configs that still contain `HERDR_SESSION` remain sourceable, but that
+field is ignored and never acts as a default. The same endpoint and
+synchronization-policy checks run after profile selection, so a same-named
+Mutagen session with different endpoints remains a fail-closed error.
 
 To configure and validate everything without opening the TUI, run:
 
 ```bash
-hremote --setup-only
+hremote --session project-session --setup-only
 ```
 
 Mutagen preserves ordinary large files because synchronization is independent

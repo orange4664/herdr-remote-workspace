@@ -18,6 +18,21 @@ Verify `brew tap-info mutagen-io/mutagen` points to
 `https://github.com/mutagen-io/homebrew-mutagen` before running
 `brew trust mutagen-io/mutagen`.
 
+## A non-interactive hremote run requires --session NAME
+
+Pass the Herdr named session for each non-interactive invocation:
+
+```bash
+hremote --session <name> --dry-run
+hremote --session <name>
+```
+
+When run directly from an interactive terminal, omitting `--session` opens a
+prompt with no default. Redirected input, pipelines, and unattended jobs fail
+closed instead of reading `HERDR_SESSION` from a config or choosing a session
+implicitly. A legacy config may still contain that field, but the launcher
+intentionally ignores it.
+
 ## Key-only SSH validation fails
 
 Run `ssh -o BatchMode=yes <ssh-target> true`. Repair the existing local SSH
@@ -27,9 +42,9 @@ or generated config. The package does not alter SSH server or firewall policy.
 ## The first run opens Herdr outside the project
 
 The remote Herdr component was not installed yet. The first interactive remote
-attach bootstraps a matching binary. Exit that attach and run `hremote` again;
-the launcher will start the named server and create or focus the configured
-project workspace.
+attach bootstraps a matching binary. Exit that attach and run
+`hremote --session <name>` again; the launcher will start the named server and
+create or focus the configured project workspace.
 
 ## Mutagen reports conflicts
 
@@ -66,7 +81,7 @@ The launcher will stop if the remote link path contains a regular file,
 directory, or a different symlink. Inspect it manually; the launcher will never
 replace it automatically.
 
-## A session name already exists
+## A Mutagen synchronization name already exists
 
 Inspect the named Mutagen session and verify both endpoints. Choose another name
 or explicitly terminate the old session only after confirming it belongs to the
@@ -77,14 +92,14 @@ changing anything:
 
 ```bash
 hremote --list-profiles
-hremote --profile <name> --dry-run
+hremote --session <herdr-session> --profile <name> --dry-run
 ```
 
 The list command prints names only; it does not display SSH targets, local
 paths, or remote paths. Every profile should use its own Mutagen synchronization
-name and Herdr session name. If the selected profile's Mutagen name already
-belongs to different endpoints or policy, `hremote` stops instead of resuming or
-replacing it.
+name. Profiles do not choose a Herdr session; pass `--session` for each
+invocation. If the selected profile's Mutagen name already belongs to different
+endpoints or policy, `hremote` stops instead of resuming or replacing it.
 
 ## A profile is missing or rejected
 
@@ -111,7 +126,7 @@ refused without `--force`, even when the shared launcher is reusable.
 ## The Herdr server does not become ready
 
 Check the remote Herdr installation and the remote log at
-`~/.config/herdr/hremote-server.log`. Confirm the configured named session is
+`~/.config/herdr/hremote-server.log`. Confirm the selected named session is
 valid and that the remote user can write under its own config directory. No
 inbound VPS port is required; both Herdr and Mutagen connect over SSH.
 

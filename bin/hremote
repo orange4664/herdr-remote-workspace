@@ -8,13 +8,16 @@ PROFILE=
 LIST_PROFILES=false
 DRY_RUN=false
 SETUP_ONLY=false
+SESSION_OPTION_SET=false
+SELECTED_HERDR_SESSION=
 SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=10)
 
 usage() {
   cat <<'EOF'
-Usage: hremote [--profile NAME | --config FILE] [--dry-run | --setup-only]
+Usage: hremote [--session NAME] [--profile NAME | --config FILE] [--dry-run | --setup-only]
        hremote --list-profiles
 
+  --session NAME   Select the Herdr named session; otherwise prompt on a terminal
   --profile NAME   Read profiles/NAME.conf from the hremote config directory
   --config FILE    Read a specific generated project config
   --list-profiles  List configured profile names without endpoint details
@@ -33,6 +36,27 @@ require_value() {
   [[ $# -ge 2 && -n $2 ]] || die "$1 requires a value"
 }
 
+valid_session_name() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+select_herdr_session() {
+  if [[ $SESSION_OPTION_SET == true ]]; then
+    valid_session_name "$SELECTED_HERDR_SESSION" || die 'invalid --session'
+    return
+  fi
+
+  [[ -t 0 && -t 2 ]] || die '--session NAME is required when input is not interactive'
+  while [[ -z $SELECTED_HERDR_SESSION ]]; do
+    printf 'Herdr session name: ' >&2
+    IFS= read -r SELECTED_HERDR_SESSION || die 'unable to read Herdr session name'
+    if [[ -z $SELECTED_HERDR_SESSION ]]; then
+      printf 'hremote: session name cannot be empty\n' >&2
+    fi
+  done
+  valid_session_name "$SELECTED_HERDR_SESSION" || die 'invalid Herdr session name'
+}
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --config)
@@ -44,6 +68,13 @@ while [[ $# -gt 0 ]]; do
     --profile)
       require_value "$@"
       PROFILE=$2
+      shift 2
+      ;;
+    --session)
+      require_value "$@"
+      [[ $SESSION_OPTION_SET != true ]] || die '--session may only be specified once'
+      SELECTED_HERDR_SESSION=$2
+      SESSION_OPTION_SET=true
       shift 2
       ;;
     --list-profiles)
@@ -73,7 +104,8 @@ done
 [[ $DRY_RUN != true || $SETUP_ONLY != true ]] || die '--dry-run and --setup-only cannot be combined'
 
 if [[ $LIST_PROFILES == true ]]; then
-  [[ -z $PROFILE && $CONFIG_OPTION_SET != true && $DRY_RUN != true && $SETUP_ONLY != true ]] \
+  [[ -z $PROFILE && $CONFIG_OPTION_SET != true && $DRY_RUN != true && $SETUP_ONLY != true \
+    && $SESSION_OPTION_SET != true ]] \
     || die '--list-profiles cannot be combined with other options'
   if [[ -d $CONFIG_DIR/profiles ]]; then
     shopt -s nullglob
@@ -89,6 +121,8 @@ if [[ $LIST_PROFILES == true ]]; then
   exit 0
 fi
 
+select_herdr_session
+
 if [[ -n $PROFILE ]]; then
   CONFIG_FILE=$CONFIG_DIR/profiles/$PROFILE.conf
 fi
@@ -99,9 +133,9 @@ LOCAL_PATH=
 SSH_TARGET=
 REMOTE_PATH=
 SYNC_NAME=
-HERDR_SESSION=
 IGNORE_PATHS=()
 REMOTE_SYMLINKS=()
+# Legacy configs may define HERDR_SESSION. It remains sourceable but is ignored.
 # The generated config is mode 600 and owned by the invoking user.
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -110,7 +144,6 @@ source "$CONFIG_FILE"
 [[ ${SSH_TARGET:-} =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'SSH_TARGET is invalid'
 [[ ${REMOTE_PATH:-} =~ ^(~\/|\/)[A-Za-z0-9._\/-]+$ ]] || die 'REMOTE_PATH is invalid'
 [[ ${SYNC_NAME:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'SYNC_NAME is invalid'
-[[ ${HERDR_SESSION:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'HERDR_SESSION is invalid'
 
 remote_path_tail=${REMOTE_PATH#~/}
 remote_path_tail=${remote_path_tail#/}
@@ -342,12 +375,12 @@ done
 
 if ! ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'command -v herdr >/dev/null || test -x "$HOME/.local/bin/herdr"'; then
   printf 'Remote Herdr is not bootstrapped yet. The interactive attach will install the matching remote component.\n' >&2
-  printf 'Exit after bootstrap, then run hremote again to create the project workspace.\n' >&2
-  exec herdr --remote "$SSH_TARGET" --session "$HERDR_SESSION"
+  printf 'Exit after bootstrap, then rerun hremote with the same --session NAME to create the project workspace.\n' >&2
+  exec herdr --remote "$SSH_TARGET" --session "$SELECTED_HERDR_SESSION"
 fi
 
 remote_herdr_command() {
-  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$HERDR_SESSION" "$@" <<'REMOTE_HERDR'
+  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$SELECTED_HERDR_SESSION" "$@" <<'REMOTE_HERDR'
 set -eu
 session_name=$1
 shift
@@ -383,7 +416,7 @@ else:
 server_json=$(remote_herdr_command status server --json) || die 'unable to inspect the remote Herdr server'
 server_state=$(printf '%s' "$server_json" | parse_server_status)
 if [[ $server_state == stopped ]]; then
-  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$HERDR_SESSION" <<'REMOTE_SERVER'
+  ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" sh -s -- "$SELECTED_HERDR_SESSION" <<'REMOTE_SERVER'
 set -eu
 session_name=$1
 herdr_bin=$(command -v herdr 2>/dev/null || true)
@@ -406,7 +439,7 @@ REMOTE_SERVER
   [[ $server_state == running ]] || die 'remote Herdr server did not become ready'
 fi
 
-workspace_label=hremote-$HERDR_SESSION
+workspace_label=hremote-$SELECTED_HERDR_SESSION
 workspace_json=$(remote_herdr_command workspace list)
 workspace_id=$(printf '%s' "$workspace_json" | python3 -c '
 import json, re, sys
@@ -466,4 +499,4 @@ if [[ $SETUP_ONLY == true ]]; then
   exit 0
 fi
 
-exec herdr --remote "$SSH_TARGET" --session "$HERDR_SESSION"
+exec herdr --remote "$SSH_TARGET" --session "$SELECTED_HERDR_SESSION"

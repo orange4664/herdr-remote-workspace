@@ -144,6 +144,7 @@ remote_path_prefix=${remote_path%example}
 help_output=$(HOME="$home_dir" PATH="$TEST_PATH" "$ROOT/install.sh" --help)
 assert_contains "$help_output" '--local-path'
 assert_contains "$help_output" '--profile NAME'
+assert_not_contains "$help_output" '--session-name'
 
 if HOME="$home_dir" PATH="$TEST_PATH" "$ROOT/install.sh" --dry-run >/dev/null 2>&1; then
   fail 'installer accepted missing required arguments'
@@ -155,7 +156,6 @@ dry_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --bin-dir "$bin_dir" \
   --config-file "$config_file" \
   --dry-run)
@@ -170,7 +170,6 @@ profile_custom_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$lo
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --profile custom-name \
   --config-file "$config_file" \
   --dry-run)
@@ -182,7 +181,6 @@ if HOME="$home_dir" PATH="$TEST_PATH" "$ROOT/install.sh" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --profile ../unsafe \
   --dry-run >/dev/null 2>&1; then
   fail 'installer accepted an unsafe profile name'
@@ -194,7 +192,6 @@ HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --ignore build-cache \
   --ignore docs/current \
   --remote-symlink docs/current=../shared \
@@ -212,6 +209,10 @@ fi
 grep -Fq "SSH_TARGET='example-host'" "$config_file" || fail 'SSH target was not rendered'
 grep -Fq "REMOTE_PATH='~/work/example'" "$config_file" || fail 'remote path did not round-trip literally'
 grep -Fq 'REMOTE_SYMLINKS=(' "$config_file" || fail 'remote symlink config was not rendered'
+if grep -Fq 'HERDR_SESSION=' "$config_file"; then
+  fail 'new default config persisted a Herdr session'
+fi
+printf "HERDR_SESSION='legacy-config-session'\n" >>"$config_file"
 
 if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   "$ROOT/install.sh" \
@@ -219,7 +220,6 @@ if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --bin-dir "$bin_dir" \
   --config-file "$config_file" >/dev/null 2>&1; then
   fail 'installer overwrote existing files without --force'
@@ -235,7 +235,6 @@ HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --profile primary \
   --bin-dir "$bin_dir" >/dev/null
 
@@ -245,7 +244,6 @@ HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target second-host \
   --remote-path "$second_remote_path" \
   --sync-name second-sync \
-  --session-name second-session \
   --profile second \
   --bin-dir "$bin_dir" >/dev/null
 
@@ -254,7 +252,10 @@ cmp -s "$ROOT/bin/hremote" "$bin_dir/hremote" || fail 'profile installation chan
 grep -Fq "SSH_TARGET='example-host'" "$primary_profile" || fail 'primary profile has the wrong SSH target'
 grep -Fq "SSH_TARGET='second-host'" "$second_profile" || fail 'second profile has the wrong SSH target'
 grep -Fq "SYNC_NAME='second-sync'" "$second_profile" || fail 'second profile has the wrong Mutagen session'
-grep -Fq "HERDR_SESSION='second-session'" "$second_profile" || fail 'second profile has the wrong Herdr session'
+if grep -Fq 'HERDR_SESSION=' "$second_profile"; then
+  fail 'new profile config persisted a Herdr session'
+fi
+printf "HERDR_SESSION='legacy-profile-session'\n" >>"$second_profile"
 
 if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   "$ROOT/install.sh" \
@@ -262,7 +263,6 @@ if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name example-sync \
-  --session-name example-session \
   --profile primary \
   --bin-dir "$bin_dir" >/dev/null 2>&1; then
   fail 'installer overwrote an existing profile config without --force'
@@ -277,7 +277,6 @@ if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --ssh-target example-host \
   --remote-path "$remote_path" \
   --sync-name unused-sync \
-  --session-name unused-session \
   --profile unused \
   --bin-dir "$bin_dir" >/dev/null 2>&1; then
   fail 'installer accepted a different existing launcher without --force'
@@ -285,6 +284,7 @@ fi
 mv "$launcher_backup" "$bin_dir/hremote"
 
 launcher_help=$(HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --help)
+assert_contains "$launcher_help" '--session NAME'
 assert_contains "$launcher_help" '--profile NAME'
 assert_contains "$launcher_help" '--list-profiles'
 
@@ -293,27 +293,112 @@ profile_list=$(HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --list-prof
 assert_not_contains "$profile_list" 'example-host'
 assert_not_contains "$profile_list" "$remote_path_prefix"
 
-if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --profile ../unsafe --dry-run >/dev/null 2>&1; then
+if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" \
+  --session example-session --profile ../unsafe --dry-run >/dev/null 2>&1; then
   fail 'launcher accepted an unsafe profile name'
 fi
 if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" \
-  --profile primary --config "$config_file" --dry-run >/dev/null 2>&1; then
+  --session example-session --profile primary --config "$config_file" --dry-run >/dev/null 2>&1; then
   fail 'launcher combined --profile and --config'
 fi
 if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --list-profiles --dry-run >/dev/null 2>&1; then
   fail 'launcher combined --list-profiles with another mode'
 fi
+if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" \
+  --list-profiles --session example-session >/dev/null 2>&1; then
+  fail 'launcher combined --list-profiles with --session'
+fi
+
+for omitted_mode in attach dry-run setup-only; do
+  : >"$log_file"
+  omitted_output=$TEST_ROOT/omitted-$omitted_mode.out
+  if [[ $omitted_mode == attach ]]; then
+    if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+      HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" \
+      </dev/null >"$omitted_output" 2>&1; then
+      fail 'launcher accepted an omitted session in attach mode'
+    fi
+  elif HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+    HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" "--$omitted_mode" \
+    </dev/null >"$omitted_output" 2>&1; then
+    fail "launcher accepted an omitted session in $omitted_mode mode"
+  fi
+  assert_contains "$(<"$omitted_output")" '--session NAME is required when input is not interactive'
+  [[ ! -s $log_file ]] || fail "omitted session executed an external command in $omitted_mode mode"
+done
+
+: >"$log_file"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" --session 'bad/name' --dry-run \
+  >/dev/null 2>&1; then
+  fail 'launcher accepted an invalid explicit session'
+fi
+[[ ! -s $log_file ]] || fail 'invalid explicit session executed an external command'
+
+: >"$log_file"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" \
+  --session first --session second --dry-run >/dev/null 2>&1; then
+  fail 'launcher accepted duplicate --session options'
+fi
+[[ ! -s $log_file ]] || fail 'duplicate --session options executed an external command'
+
+: >"$log_file"
+interactive_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_CONFIG="$config_file" python3 -c '
+import errno, os, pty, select, subprocess, sys, time
+
+master, slave = pty.openpty()
+process = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+deadline = time.monotonic() + 5
+try:
+    os.write(master, b"\nexample-session\n")
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("interactive launcher timed out")
+        readable, _, _ = select.select([master], [], [], min(0.1, remaining))
+        if readable:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                chunk = b""
+            if chunk:
+                os.write(sys.stdout.fileno(), chunk)
+            elif process.poll() is not None:
+                break
+        if process.poll() is not None and not readable:
+            break
+    status = process.wait(timeout=1)
+finally:
+    os.close(master)
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+raise SystemExit(status)
+' "$bin_dir/hremote" --dry-run 2>&1)
+assert_contains "$interactive_output" 'Herdr session name:'
+assert_contains "$interactive_output" 'session name cannot be empty'
+assert_contains "$interactive_output" 'Configuration and local dependencies are valid.'
+[[ ! -s $log_file ]] || fail 'interactive dry-run executed an external command'
 
 : >"$log_file"
 second_profile_dry_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
-  "$bin_dir/hremote" --profile second --dry-run)
+  "$bin_dir/hremote" --session second-session --profile second --dry-run)
 assert_contains "$second_profile_dry_output" 'Configuration and local dependencies are valid.'
 [[ ! -s $log_file ]] || fail 'profile dry-run executed an external command'
 
 : >"$log_file"
 if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   HREMOTE_TEST_SESSION=second-mismatch \
-  "$bin_dir/hremote" --profile second >/dev/null 2>&1; then
+  "$bin_dir/hremote" --session second-session --profile second >/dev/null 2>&1; then
   fail 'profile accepted a same-named Mutagen session with different endpoints'
 fi
 if grep -Fq 'mutagen sync resume second-sync' "$log_file" || grep -Fq 'mutagen sync create' "$log_file"; then
@@ -322,35 +407,41 @@ fi
 
 : >"$log_file"
 if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
-  "$bin_dir/hremote" --profile second >"$TEST_ROOT/second-profile.out" 2>&1; then
+  "$bin_dir/hremote" --session second-session --profile second >"$TEST_ROOT/second-profile.out" 2>&1; then
   sed -n '1,120p' "$TEST_ROOT/second-profile.out" >&2
   fail 'launcher failed to select the second profile'
 fi
 grep -Fq 'mutagen sync flush second-sync' "$log_file" || fail 'second profile did not use its Mutagen session'
 grep -Fq 'second-host:~/work/second' "$log_file" || fail 'second profile did not use its remote endpoint'
-grep -Fq 'herdr --remote second-host --session second-session' "$log_file" || fail 'second profile did not use its Herdr session'
+grep -Fq 'herdr --remote second-host --session second-session' "$log_file" || fail 'explicit session was not used with the second profile'
+if grep -Fq 'legacy-profile-session' "$log_file"; then
+  fail 'second profile implicitly selected its legacy Herdr session'
+fi
 
 : >"$log_file"
 launcher_dry_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
-  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" --dry-run)
+  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" --session example-session --dry-run)
 assert_contains "$launcher_dry_output" 'Configuration and local dependencies are valid.'
 [[ ! -s $log_file ]] || fail 'launcher dry-run executed an external command'
 
 : >"$log_file"
 if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_CONFIG="$config_file" \
-  "$bin_dir/hremote" >"$TEST_ROOT/missing-session.out" 2>&1; then
+  "$bin_dir/hremote" --session example-session >"$TEST_ROOT/missing-session.out" 2>&1; then
   sed -n '1,120p' "$TEST_ROOT/missing-session.out" >&2
   fail 'launcher failed while creating a missing Mutagen session'
 fi
 grep -Fq 'mutagen sync create' "$log_file" || fail 'launcher did not create a missing Mutagen session'
 grep -Fq 'mutagen sync flush example-sync' "$log_file" || fail 'launcher did not flush the Mutagen session'
 grep -Fq 'herdr --remote example-host --session example-session' "$log_file" || fail 'launcher did not fall back to remote Herdr bootstrap'
+if grep -Fq 'legacy-config-session' "$log_file"; then
+  fail 'default config implicitly selected its legacy Herdr session'
+fi
 
 : >"$log_file"
 if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_TEST_SESSION=mismatch \
-  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" >/dev/null 2>&1; then
+  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" --session example-session >/dev/null 2>&1; then
   fail 'launcher accepted a same-named Mutagen session with different endpoints'
 fi
 if grep -Fq 'mutagen sync resume' "$log_file"; then
@@ -361,7 +452,8 @@ fi
 if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_TEST_SESSION=match \
   HREMOTE_TEST_HERDR_INSTALLED=1 HREMOTE_FAKE_STATE="$TEST_ROOT/state" \
-  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" --setup-only >"$TEST_ROOT/matching-session.out" 2>&1; then
+  HREMOTE_CONFIG="$config_file" "$bin_dir/hremote" \
+  --session example-session --setup-only >"$TEST_ROOT/matching-session.out" 2>&1; then
   sed -n '1,120p' "$TEST_ROOT/matching-session.out" >&2
   fail 'launcher failed while resuming a matching Mutagen session'
 fi
