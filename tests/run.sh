@@ -161,7 +161,11 @@ HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
 
 [[ -x $bin_dir/hremote ]] || fail 'launcher was not installed executable'
 [[ -f $config_file ]] || fail 'config was not generated'
-config_mode=$(stat -f '%Lp' "$config_file" 2>/dev/null || stat -c '%a' "$config_file")
+if stat -c '%a' "$config_file" >/dev/null 2>&1; then
+  config_mode=$(stat -c '%a' "$config_file")
+else
+  config_mode=$(stat -f '%Lp' "$config_file")
+fi
 [[ $config_mode == 600 ]] || fail "config mode is $config_mode, expected 600"
 grep -Fq "SSH_TARGET='example-host'" "$config_file" || fail 'SSH target was not rendered'
 grep -Fq "REMOTE_PATH='~/work/example'" "$config_file" || fail 'remote path did not round-trip literally'
