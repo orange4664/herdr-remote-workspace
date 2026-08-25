@@ -89,9 +89,11 @@ replacing it.
 ## A profile is missing or rejected
 
 Named profiles live under `~/.config/hremote/profiles/` and use a `.conf`
-suffix. Profile names must begin with an ASCII letter or digit and contain only
-ASCII letters, digits, `.`, `_`, and `-`; path separators and `..` traversal are
-rejected. Run `hremote --list-profiles` to see selectable names.
+suffix. If `XDG_CONFIG_HOME` is set, both the installer and launcher use
+`$XDG_CONFIG_HOME/hremote/profiles/` instead. Check that variable first when a
+profile exists on disk but is absent from `hremote --list-profiles`. Profile
+names must begin with an ASCII letter or digit and contain only ASCII letters,
+digits, `.`, `_`, and `-`; path separators and `..` traversal are rejected.
 
 Do not combine `--profile` with `--config`. Use `--profile NAME` for a generated
 named profile, `--config FILE` for an explicit config path, or neither for the

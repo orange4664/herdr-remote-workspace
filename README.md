@@ -59,7 +59,8 @@ multiple servers or projects behind the same command, install a named profile:
   --profile second
 ```
 
-Named profiles are written to `~/.config/hremote/profiles/NAME.conf`. An
+Named profiles are written to `~/.config/hremote/profiles/NAME.conf`, or to
+`$XDG_CONFIG_HOME/hremote/profiles/NAME.conf` when `XDG_CONFIG_HOME` is set. An
 explicit `--config-file FILE` takes precedence over that generated profile
 path. Profile names must start with an ASCII letter or digit and may contain
 only ASCII letters, digits, `.`, `_`, and `-`.
