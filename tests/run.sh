@@ -16,13 +16,20 @@ assert_contains() {
   [[ $haystack == *"$needle"* ]] || fail "expected output to contain: $needle"
 }
 
+assert_not_contains() {
+  local haystack=$1
+  local needle=$2
+  [[ $haystack != *"$needle"* ]] || fail "expected output not to contain: $needle"
+}
+
 project_dir=$TEST_ROOT/project
+second_project_dir=$TEST_ROOT/second-project
 home_dir=$TEST_ROOT/home
 stub_dir=$TEST_ROOT/stubs
 bin_dir=$home_dir/bin
 config_file=$home_dir/config/hremote.conf
 log_file=$TEST_ROOT/commands.log
-mkdir -p "$project_dir" "$stub_dir" "$home_dir" "$TEST_ROOT/state"
+mkdir -p "$project_dir" "$second_project_dir" "$stub_dir" "$home_dir" "$TEST_ROOT/state"
 
 for command_name in ssh herdr; do
   sed "s|COMMAND_NAME|$command_name|g" >"$stub_dir/$command_name" <<'STUB'
@@ -97,6 +104,9 @@ if [[ $1 == sync && $2 == list ]]; then
     mismatch)
       printf '[{"name":"example-sync","mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true},"alpha":{"path":"/wrong/project"},"beta":{"host":"example-host","path":"~/work/example"}}]\n'
       ;;
+    second-mismatch)
+      printf '[{"name":"second-sync","mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin"]},"alpha":{"protocol":"local","path":"/wrong/project"},"beta":{"protocol":"ssh","host":"second-host","path":"~/work/second"}}]\n'
+      ;;
     match)
       paused=true
       connected=false
@@ -124,9 +134,13 @@ TEST_PATH=$stub_dir:/usr/bin:/bin
 # The remote shell, not this test process, must expand the leading tilde.
 # shellcheck disable=SC2088
 remote_path='~/work/example'
+# shellcheck disable=SC2088
+second_remote_path='~/work/second'
+remote_path_prefix=${remote_path%example}
 
 help_output=$(HOME="$home_dir" PATH="$TEST_PATH" "$ROOT/install.sh" --help)
 assert_contains "$help_output" '--local-path'
+assert_contains "$help_output" '--profile NAME'
 
 if HOME="$home_dir" PATH="$TEST_PATH" "$ROOT/install.sh" --dry-run >/dev/null 2>&1; then
   fail 'installer accepted missing required arguments'
@@ -143,8 +157,33 @@ dry_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --config-file "$config_file" \
   --dry-run)
 assert_contains "$dry_output" 'No files, synchronization sessions, or remote objects were changed.'
+assert_contains "$dry_output" "config:   $config_file"
 [[ ! -e $config_file && ! -e $bin_dir/hremote ]] || fail 'dry-run wrote installation files'
 [[ ! -e $log_file ]] || fail 'dry-run executed an external command'
+
+profile_custom_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$ROOT/install.sh" \
+  --local-path "$project_dir" \
+  --ssh-target example-host \
+  --remote-path "$remote_path" \
+  --sync-name example-sync \
+  --session-name example-session \
+  --profile custom-name \
+  --config-file "$config_file" \
+  --dry-run)
+assert_contains "$profile_custom_output" "config:   $config_file"
+assert_not_contains "$profile_custom_output" 'profiles/custom-name.conf'
+
+if HOME="$home_dir" PATH="$TEST_PATH" "$ROOT/install.sh" \
+  --local-path "$project_dir" \
+  --ssh-target example-host \
+  --remote-path "$remote_path" \
+  --sync-name example-sync \
+  --session-name example-session \
+  --profile ../unsafe \
+  --dry-run >/dev/null 2>&1; then
+  fail 'installer accepted an unsafe profile name'
+fi
 
 HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   "$ROOT/install.sh" \
@@ -182,6 +221,111 @@ if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   --config-file "$config_file" >/dev/null 2>&1; then
   fail 'installer overwrote existing files without --force'
 fi
+
+profile_dir=$home_dir/.config/hremote/profiles
+primary_profile=$profile_dir/primary.conf
+second_profile=$profile_dir/second.conf
+
+HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$ROOT/install.sh" \
+  --local-path "$project_dir" \
+  --ssh-target example-host \
+  --remote-path "$remote_path" \
+  --sync-name example-sync \
+  --session-name example-session \
+  --profile primary \
+  --bin-dir "$bin_dir" >/dev/null
+
+HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$ROOT/install.sh" \
+  --local-path "$second_project_dir" \
+  --ssh-target second-host \
+  --remote-path "$second_remote_path" \
+  --sync-name second-sync \
+  --session-name second-session \
+  --profile second \
+  --bin-dir "$bin_dir" >/dev/null
+
+[[ -f $primary_profile && -f $second_profile ]] || fail 'profile configs were not generated in the profile directory'
+cmp -s "$ROOT/bin/hremote" "$bin_dir/hremote" || fail 'profile installation changed the shared launcher'
+grep -Fq "SSH_TARGET='example-host'" "$primary_profile" || fail 'primary profile has the wrong SSH target'
+grep -Fq "SSH_TARGET='second-host'" "$second_profile" || fail 'second profile has the wrong SSH target'
+grep -Fq "SYNC_NAME='second-sync'" "$second_profile" || fail 'second profile has the wrong Mutagen session'
+grep -Fq "HERDR_SESSION='second-session'" "$second_profile" || fail 'second profile has the wrong Herdr session'
+
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$ROOT/install.sh" \
+  --local-path "$project_dir" \
+  --ssh-target example-host \
+  --remote-path "$remote_path" \
+  --sync-name example-sync \
+  --session-name example-session \
+  --profile primary \
+  --bin-dir "$bin_dir" >/dev/null 2>&1; then
+  fail 'installer overwrote an existing profile config without --force'
+fi
+
+launcher_backup=$TEST_ROOT/hremote.backup
+cp "$bin_dir/hremote" "$launcher_backup"
+printf '\n# locally changed launcher\n' >>"$bin_dir/hremote"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$ROOT/install.sh" \
+  --local-path "$project_dir" \
+  --ssh-target example-host \
+  --remote-path "$remote_path" \
+  --sync-name unused-sync \
+  --session-name unused-session \
+  --profile unused \
+  --bin-dir "$bin_dir" >/dev/null 2>&1; then
+  fail 'installer accepted a different existing launcher without --force'
+fi
+mv "$launcher_backup" "$bin_dir/hremote"
+
+launcher_help=$(HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --help)
+assert_contains "$launcher_help" '--profile NAME'
+assert_contains "$launcher_help" '--list-profiles'
+
+profile_list=$(HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --list-profiles)
+[[ $profile_list == $'primary\nsecond' ]] || fail "unexpected profile list: $profile_list"
+assert_not_contains "$profile_list" 'example-host'
+assert_not_contains "$profile_list" "$remote_path_prefix"
+
+if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --profile ../unsafe --dry-run >/dev/null 2>&1; then
+  fail 'launcher accepted an unsafe profile name'
+fi
+if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" \
+  --profile primary --config "$config_file" --dry-run >/dev/null 2>&1; then
+  fail 'launcher combined --profile and --config'
+fi
+if HOME="$home_dir" PATH="$TEST_PATH" "$bin_dir/hremote" --list-profiles --dry-run >/dev/null 2>&1; then
+  fail 'launcher combined --list-profiles with another mode'
+fi
+
+: >"$log_file"
+second_profile_dry_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$bin_dir/hremote" --profile second --dry-run)
+assert_contains "$second_profile_dry_output" 'Configuration and local dependencies are valid.'
+[[ ! -s $log_file ]] || fail 'profile dry-run executed an external command'
+
+: >"$log_file"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_TEST_SESSION=second-mismatch \
+  "$bin_dir/hremote" --profile second >/dev/null 2>&1; then
+  fail 'profile accepted a same-named Mutagen session with different endpoints'
+fi
+if grep -Fq 'mutagen sync resume second-sync' "$log_file" || grep -Fq 'mutagen sync create' "$log_file"; then
+  fail 'profile changed a mismatched Mutagen session'
+fi
+
+: >"$log_file"
+if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  "$bin_dir/hremote" --profile second >"$TEST_ROOT/second-profile.out" 2>&1; then
+  sed -n '1,120p' "$TEST_ROOT/second-profile.out" >&2
+  fail 'launcher failed to select the second profile'
+fi
+grep -Fq 'mutagen sync flush second-sync' "$log_file" || fail 'second profile did not use its Mutagen session'
+grep -Fq 'second-host:~/work/second' "$log_file" || fail 'second profile did not use its remote endpoint'
+grep -Fq 'herdr --remote second-host --session second-session' "$log_file" || fail 'second profile did not use its Herdr session'
 
 : >"$log_file"
 launcher_dry_output=$(HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \

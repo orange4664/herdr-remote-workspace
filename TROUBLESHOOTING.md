@@ -72,6 +72,40 @@ Inspect the named Mutagen session and verify both endpoints. Choose another name
 or explicitly terminate the old session only after confirming it belongs to the
 same project. The installer does not terminate existing sessions.
 
+With named profiles, confirm that you selected the intended profile before
+changing anything:
+
+```bash
+hremote --list-profiles
+hremote --profile <name> --dry-run
+```
+
+The list command prints names only; it does not display SSH targets, local
+paths, or remote paths. Every profile should use its own Mutagen synchronization
+name and Herdr session name. If the selected profile's Mutagen name already
+belongs to different endpoints or policy, `hremote` stops instead of resuming or
+replacing it.
+
+## A profile is missing or rejected
+
+Named profiles live under `~/.config/hremote/profiles/` and use a `.conf`
+suffix. Profile names must begin with an ASCII letter or digit and contain only
+ASCII letters, digits, `.`, `_`, and `-`; path separators and `..` traversal are
+rejected. Run `hremote --list-profiles` to see selectable names.
+
+Do not combine `--profile` with `--config`. Use `--profile NAME` for a generated
+named profile, `--config FILE` for an explicit config path, or neither for the
+original default config.
+
+## Installing another profile reports a launcher collision
+
+The installer reuses the existing launcher only when it is a byte-identical,
+regular executable copy of this repository's `bin/hremote`. A symlink,
+non-executable file, or locally modified launcher is refused without `--force`.
+Review the existing file and the proposed launcher before deciding whether an
+intentional replacement is appropriate. Existing profile configs are always
+refused without `--force`, even when the shared launcher is reusable.
+
 ## The Herdr server does not become ready
 
 Check the remote Herdr installation and the remote log at
@@ -85,6 +119,7 @@ the `--json` response, as this launcher's implementation does.
 
 ## Clean rollback
 
-Remove the exact installed launcher and generated config. Verify the Mutagen
-session endpoints before terminating that one session. Keep both synchronized
-trees by default, and do not delete remote project data as part of rollback.
+Remove the exact installed launcher and only the generated default/profile
+configs being retired. Verify each Mutagen session's endpoints before
+terminating it. Keep synchronized trees by default, and do not delete remote
+project data as part of rollback.

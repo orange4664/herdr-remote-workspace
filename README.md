@@ -46,9 +46,30 @@ Remove `--dry-run` to validate key-only SSH and install:
 - `hremote` under `~/.local/bin`;
 - a mode-600 config under `~/.config/hremote/config`.
 
-The installer refuses to replace either file unless `--force` is supplied. Use
-`--bin-dir` and `--config-file` to choose other local destinations. It does not
-create a Mutagen session or remote directory.
+This no-profile form remains the default for a single project. To configure
+multiple servers or projects behind the same command, install a named profile:
+
+```bash
+./install.sh \
+  --local-path /absolute/path/to/second-project \
+  --ssh-target second-ssh-alias \
+  --remote-path '~/work/second-project' \
+  --sync-name second-project-sync \
+  --session-name second-project-session \
+  --profile second
+```
+
+Named profiles are written to `~/.config/hremote/profiles/NAME.conf`. An
+explicit `--config-file FILE` takes precedence over that generated profile
+path. Profile names must start with an ASCII letter or digit and may contain
+only ASCII letters, digits, `.`, `_`, and `-`.
+
+One launcher is shared by all profiles. Installing another profile reuses an
+existing byte-identical executable launcher without requiring `--force`. The
+installer still refuses a different existing launcher or an existing target
+config unless `--force` is supplied. Use `--bin-dir` and `--config-file` to
+choose other local destinations. Installation does not create a Mutagen session
+or remote directory.
 
 Ensure the selected bin directory is already on `PATH`; the installer does not
 edit startup files. Verify with `command -v hremote` in a fresh shell.
@@ -77,6 +98,22 @@ Then run `hremote`. It performs these steps in order:
 On the first run, Herdr may need an interactive attach to bootstrap its matching
 remote component. Exit after bootstrap and run `hremote` again so it can create
 the project-rooted workspace.
+
+List configured profile names without displaying their SSH targets or paths,
+then select one by name:
+
+```bash
+hremote --list-profiles
+hremote --profile second --dry-run
+hremote --profile second
+```
+
+`--profile` and `--config` are mutually exclusive. Without either option,
+`hremote` keeps loading the original default config (including
+`HREMOTE_CONFIG`, when set). Each profile supplies its own SSH target, remote
+path, Mutagen synchronization name, and Herdr session name. The same endpoint
+and synchronization-policy checks run after selection, so a same-named Mutagen
+session with different endpoints remains a fail-closed error.
 
 To configure and validate everything without opening the TUI, run:
 
@@ -111,8 +148,9 @@ Mutagen's `two-way-safe` mode gives both endpoints equal precedence and surfaces
 conflicting unsynchronized edits instead of silently choosing a winner. Inspect
 conflicts with `mutagen sync list <sync-name>` before retrying.
 
-To uninstall the local command, remove only the installed launcher and generated
-config. To stop synchronization, first verify its endpoints, then run:
+To uninstall the local command, remove only the installed launcher and the
+specific generated config or profile configs you no longer need. To stop
+synchronization, first verify each profile's endpoints, then run:
 
 ```bash
 mutagen sync terminate <sync-name>

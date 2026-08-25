@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_FILE=${HREMOTE_CONFIG:-${XDG_CONFIG_HOME:-${HOME:+"$HOME/.config"}}/hremote/config}
+CONFIG_DIR=${XDG_CONFIG_HOME:-${HOME:+"$HOME/.config"}}/hremote
+CONFIG_FILE=${HREMOTE_CONFIG:-$CONFIG_DIR/config}
+CONFIG_OPTION_SET=false
+PROFILE=
+LIST_PROFILES=false
 DRY_RUN=false
 SETUP_ONLY=false
 SSH_OPTIONS=(-o BatchMode=yes -o ConnectTimeout=10)
 
 usage() {
   cat <<'EOF'
-Usage: hremote [--config FILE] [--dry-run | --setup-only]
+Usage: hremote [--profile NAME | --config FILE] [--dry-run | --setup-only]
+       hremote --list-profiles
 
-  --config FILE  Read a specific generated project config
-  --dry-run      Validate local configuration without connecting or writing
-  --setup-only   Configure and validate without opening the Herdr TUI
-  --help         Show this help
+  --profile NAME   Read profiles/NAME.conf from the hremote config directory
+  --config FILE    Read a specific generated project config
+  --list-profiles  List configured profile names without endpoint details
+  --dry-run        Validate local configuration without connecting or writing
+  --setup-only     Configure and validate without opening the Herdr TUI
+  --help           Show this help
 EOF
 }
 
@@ -31,7 +38,17 @@ while [[ $# -gt 0 ]]; do
     --config)
       require_value "$@"
       CONFIG_FILE=$2
+      CONFIG_OPTION_SET=true
       shift 2
+      ;;
+    --profile)
+      require_value "$@"
+      PROFILE=$2
+      shift 2
+      ;;
+    --list-profiles)
+      LIST_PROFILES=true
+      shift
       ;;
     --dry-run)
       DRY_RUN=true
@@ -51,7 +68,30 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ -z $PROFILE || $PROFILE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid --profile'
+[[ -z $PROFILE || $CONFIG_OPTION_SET != true ]] || die '--profile and --config cannot be combined'
 [[ $DRY_RUN != true || $SETUP_ONLY != true ]] || die '--dry-run and --setup-only cannot be combined'
+
+if [[ $LIST_PROFILES == true ]]; then
+  [[ -z $PROFILE && $CONFIG_OPTION_SET != true && $DRY_RUN != true && $SETUP_ONLY != true ]] \
+    || die '--list-profiles cannot be combined with other options'
+  if [[ -d $CONFIG_DIR/profiles ]]; then
+    shopt -s nullglob
+    profile_files=("$CONFIG_DIR"/profiles/*.conf)
+    for profile_file in "${profile_files[@]-}"; do
+      [[ -f $profile_file ]] || continue
+      profile_name=${profile_file##*/}
+      profile_name=${profile_name%.conf}
+      [[ $profile_name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
+      printf '%s\n' "$profile_name"
+    done | LC_ALL=C sort
+  fi
+  exit 0
+fi
+
+if [[ -n $PROFILE ]]; then
+  CONFIG_FILE=$CONFIG_DIR/profiles/$PROFILE.conf
+fi
 
 [[ -f $CONFIG_FILE ]] || die "config not found: $CONFIG_FILE"
 

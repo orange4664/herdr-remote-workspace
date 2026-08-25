@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_BIN_DIR=${HOME:+"$HOME/.local/bin"}
-DEFAULT_CONFIG_FILE=${XDG_CONFIG_HOME:-${HOME:+"$HOME/.config"}}/hremote/config
+DEFAULT_CONFIG_DIR=${XDG_CONFIG_HOME:-${HOME:+"$HOME/.config"}}/hremote
+DEFAULT_CONFIG_FILE=$DEFAULT_CONFIG_DIR/config
 
 LOCAL_PATH=
 SSH_TARGET=
@@ -12,6 +13,8 @@ SYNC_NAME=
 HERDR_SESSION=
 BIN_DIR=$DEFAULT_BIN_DIR
 CONFIG_FILE=$DEFAULT_CONFIG_FILE
+CONFIG_FILE_EXPLICIT=false
+PROFILE=
 DRY_RUN=false
 FORCE=false
 IGNORE_PATHS=(.DS_Store .venv .tmpbin)
@@ -33,6 +36,7 @@ Optional:
   --remote-symlink A=B    Ensure remote-root/A points to relative target B
   --bin-dir DIR           Launcher destination (default: ~/.local/bin)
   --config-file FILE      Generated config path
+  --profile NAME          Write profiles/NAME.conf unless --config-file is set
   --dry-run               Validate and print the planned local changes only
   --force                 Replace an existing managed launcher or config
   --help                  Show this help
@@ -96,6 +100,12 @@ while [[ $# -gt 0 ]]; do
     --config-file)
       require_value "$@"
       CONFIG_FILE=$2
+      CONFIG_FILE_EXPLICIT=true
+      shift 2
+      ;;
+    --profile)
+      require_value "$@"
+      PROFILE=$2
       shift 2
       ;;
     --dry-run)
@@ -128,7 +138,12 @@ done
 [[ $REMOTE_PATH =~ ^(~\/|\/)[A-Za-z0-9._\/-]+$ ]] || die 'invalid --remote-path'
 [[ $SYNC_NAME =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid --sync-name'
 [[ $HERDR_SESSION =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid --session-name'
+[[ -z $PROFILE || $PROFILE =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid --profile'
 [[ $BIN_DIR == /* ]] || die '--bin-dir must be absolute'
+
+if [[ -n $PROFILE && $CONFIG_FILE_EXPLICIT != true ]]; then
+  CONFIG_FILE=$DEFAULT_CONFIG_DIR/profiles/$PROFILE.conf
+fi
 [[ $CONFIG_FILE == /* ]] || die '--config-file must be absolute'
 
 remote_path_tail=${REMOTE_PATH#~/}
@@ -222,9 +237,20 @@ if [[ $DRY_RUN == true ]]; then
   exit 0
 fi
 
-if [[ $FORCE != true ]]; then
-  [[ ! -e $launcher_target ]] || die "launcher already exists: $launcher_target (use --force to replace)"
-  [[ ! -e $CONFIG_FILE ]] || die "config already exists: $CONFIG_FILE (use --force to replace)"
+install_launcher=true
+if [[ -e $launcher_target || -L $launcher_target ]]; then
+  if [[ $FORCE == true ]]; then
+    :
+  elif [[ -f $launcher_target && ! -L $launcher_target && -x $launcher_target ]] \
+    && cmp -s "$SCRIPT_DIR/bin/hremote" "$launcher_target"; then
+    install_launcher=false
+  else
+    die "a different launcher already exists: $launcher_target (use --force to replace)"
+  fi
+fi
+
+if [[ $FORCE != true && ( -e $CONFIG_FILE || -L $CONFIG_FILE ) ]]; then
+  die "config already exists: $CONFIG_FILE (use --force to replace)"
 fi
 
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_TARGET" true >/dev/null \
@@ -238,7 +264,9 @@ chmod 600 "$config_tmp"
 mv -f "$config_tmp" "$CONFIG_FILE"
 trap - EXIT
 
-install -m 755 "$SCRIPT_DIR/bin/hremote" "$launcher_target"
+if [[ $install_launcher == true ]]; then
+  install -m 755 "$SCRIPT_DIR/bin/hremote" "$launcher_target"
+fi
 
 printf 'Installed hremote.\n'
 printf '  launcher: %s\n' "$launcher_target"
