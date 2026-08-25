@@ -221,6 +221,8 @@ case $session_state in
     ;;
 esac
 
+# REMOTE_PATH intentionally stores a literal tilde until the remote HOME is known.
+# shellcheck disable=SC2088
 if [[ $REMOTE_PATH == "~/"* ]]; then
   remote_home=$(ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'printf "%s\n" "$HOME"') \
     || die 'unable to resolve the remote home directory'
