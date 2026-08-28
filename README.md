@@ -93,7 +93,8 @@ Then run `hremote --session project-session`. It performs these steps in order:
 5. checks optional remote symlink translations without replacing unexpected
    remote objects;
 6. starts or reuses the named remote Herdr server, creates or focuses the
-   project workspace, and attaches the local thin client.
+   project workspace, and attaches the local thin client. The managed workspace
+   label is `hremote-<session>-<sync-name>`.
 
 On the first run, Herdr may need an interactive attach to bootstrap its matching
 remote component. Exit after bootstrap and run
@@ -123,6 +124,21 @@ Legacy configs that still contain `HERDR_SESSION` remain sourceable, but that
 field is ignored and never acts as a default. The same endpoint and
 synchronization-policy checks run after profile selection, so a same-named
 Mutagen session with different endpoints remains a fail-closed error.
+
+Different profiles may deliberately share one Herdr session. Give every profile
+a unique local path, remote path, and Mutagen sync name, then pass the same
+`--session` value when launching them:
+
+```bash
+hremote --session team --profile project
+hremote --session team --profile notes
+```
+
+Their managed workspace labels will be different, for example
+`hremote-team-project-sync` and `hremote-team-notes-sync`. Herdr's ordinary
+display labels are not unique, so `hremote` ignores unrelated duplicates and
+selects only the exact managed label. It still stops if that managed label is
+duplicated or its pane cwd does not match the configured remote path.
 
 To configure and validate everything without opening the TUI, run:
 

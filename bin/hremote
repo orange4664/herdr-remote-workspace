@@ -439,7 +439,7 @@ REMOTE_SERVER
   [[ $server_state == running ]] || die 'remote Herdr server did not become ready'
 fi
 
-workspace_label=hremote-$SELECTED_HERDR_SESSION
+workspace_label=hremote-$SELECTED_HERDR_SESSION-$SYNC_NAME
 workspace_json=$(remote_herdr_command workspace list)
 workspace_id=$(printf '%s' "$workspace_json" | python3 -c '
 import json, re, sys

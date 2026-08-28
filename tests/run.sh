@@ -49,6 +49,11 @@ if [[ COMMAND_NAME == ssh ]]; then
       mkdir -p "$HOME/work/example"
       exit 0
       ;;
+    *" sh -s -- $HOME/work/second ")
+      cat >/dev/null || true
+      mkdir -p "$HOME/work/second"
+      exit 0
+      ;;
     *" sh -s -- example-session --version ")
       cat >/dev/null || true
       printf 'herdr 0.8.0-test\n'
@@ -65,15 +70,34 @@ if [[ COMMAND_NAME == ssh ]]; then
       ;;
     *" sh -s -- example-session workspace list ")
       cat >/dev/null || true
-      printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"hremote-example-session"}]}}\n'
+      if [[ ${HREMOTE_TEST_WORKSPACE_CASE:-normal} == duplicate-managed ]]; then
+        printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"example-session"},{"workspace_id":"w1","label":"hremote-example-session-example-sync"},{"workspace_id":"w9","label":"hremote-example-session-example-sync"}]}}\n'
+      elif [[ " $* " == *" second-host "* ]]; then
+        printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"example-session"},{"workspace_id":"w00","label":"example-session"},{"workspace_id":"w2","label":"hremote-example-session-second-sync"}]}}\n'
+      else
+        printf '{"result":{"workspaces":[{"workspace_id":"w0","label":"example-session"},{"workspace_id":"w00","label":"example-session"},{"workspace_id":"w1","label":"hremote-example-session-example-sync"}]}}\n'
+      fi
       exit 0
       ;;
     *" sh -s -- example-session pane list --workspace w1 ")
       cat >/dev/null || true
-      printf '{"result":{"panes":[{"workspace_id":"w1","cwd":"%s/work/example"}]}}\n' "$HOME"
+      if [[ ${HREMOTE_TEST_WORKSPACE_CASE:-normal} == wrong-cwd ]]; then
+        printf '{"result":{"panes":[{"workspace_id":"w1","cwd":"%s/work/wrong"}]}}\n' "$HOME"
+      else
+        printf '{"result":{"panes":[{"workspace_id":"w1","cwd":"%s/work/example"}]}}\n' "$HOME"
+      fi
+      exit 0
+      ;;
+    *" sh -s -- example-session pane list --workspace w2 ")
+      cat >/dev/null || true
+      printf '{"result":{"panes":[{"workspace_id":"w2","cwd":"%s/work/second"}]}}\n' "$HOME"
       exit 0
       ;;
     *" sh -s -- example-session workspace focus w1 ")
+      cat >/dev/null || true
+      exit 0
+      ;;
+    *" sh -s -- example-session workspace focus w2 ")
       cat >/dev/null || true
       exit 0
       ;;
@@ -109,6 +133,9 @@ if [[ $1 == sync && $2 == list ]]; then
       ;;
     second-mismatch)
       printf '[{"name":"second-sync","mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin"]},"alpha":{"protocol":"local","path":"/wrong/project"},"beta":{"protocol":"ssh","host":"second-host","path":"~/work/second"}}]\n'
+      ;;
+    second-match)
+      printf '[{"name":"second-sync","paused":false,"mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin"]},"alpha":{"protocol":"local","path":"%s","connected":true,"scanned":true},"beta":{"protocol":"ssh","host":"second-host","path":"~/work/second","connected":true,"scanned":true}}]\n' "${HREMOTE_TEST_PROJECT:?}"
       ;;
     match)
       paused=true
@@ -466,5 +493,42 @@ fi
 if grep -Fq 'mutagen sync create' "$log_file"; then
   fail 'launcher recreated a matching Mutagen session'
 fi
+
+: >"$log_file"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_TEST_SESSION=match \
+  HREMOTE_TEST_HERDR_INSTALLED=1 HREMOTE_FAKE_STATE="$TEST_ROOT/state" \
+  HREMOTE_TEST_WORKSPACE_CASE=duplicate-managed HREMOTE_CONFIG="$config_file" \
+  "$bin_dir/hremote" --session example-session --setup-only >/dev/null 2>&1; then
+  fail 'launcher accepted duplicate managed workspace labels'
+fi
+if grep -Fq 'pane list' "$log_file" || grep -Fq 'workspace focus' "$log_file"; then
+  fail 'launcher used an ambiguous managed workspace'
+fi
+
+: >"$log_file"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_TEST_SESSION=match \
+  HREMOTE_TEST_HERDR_INSTALLED=1 HREMOTE_FAKE_STATE="$TEST_ROOT/state" \
+  HREMOTE_TEST_WORKSPACE_CASE=wrong-cwd HREMOTE_CONFIG="$config_file" \
+  "$bin_dir/hremote" --session example-session --setup-only >/dev/null 2>&1; then
+  fail 'launcher accepted a managed workspace with the wrong cwd'
+fi
+grep -Fq 'pane list --workspace w1' "$log_file" || fail 'launcher did not inspect the managed workspace cwd'
+if grep -Fq 'workspace focus' "$log_file"; then
+  fail 'launcher focused a managed workspace with the wrong cwd'
+fi
+
+: >"$log_file"
+if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_TEST_PROJECT="$second_project_dir" HREMOTE_TEST_SESSION=second-match \
+  HREMOTE_TEST_HERDR_INSTALLED=1 HREMOTE_FAKE_STATE="$TEST_ROOT/state" \
+  "$bin_dir/hremote" --session example-session --profile second --setup-only \
+  >"$TEST_ROOT/same-session-second-profile.out" 2>&1; then
+  sed -n '1,120p' "$TEST_ROOT/same-session-second-profile.out" >&2
+  fail 'second profile could not use the same Herdr session with its own managed workspace'
+fi
+grep -Fq 'pane list --workspace w2' "$log_file" || fail 'second profile did not select its sync-specific managed workspace'
+grep -Fq 'workspace focus w2' "$log_file" || fail 'second profile did not focus its managed workspace'
 
 printf 'Behavior tests passed.\n'

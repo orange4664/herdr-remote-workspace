@@ -134,6 +134,26 @@ Do not use the exit status of `herdr status server` as a running-state test: a
 valid `not_running` JSON response exits successfully. Automation should parse
 the `--json` response, as this launcher's implementation does.
 
+## Multiple remote workspaces use the configured label
+
+Current versions reserve one label per profile and session:
+
+```text
+hremote-<herdr-session>-<mutagen-sync-name>
+```
+
+Ordinary Herdr labels may repeat and do not block `hremote`. If the error refers
+to a managed label, inspect `workspace list`, pane cwd values, running processes,
+and recent terminal output before changing anything. Preserve the workspace
+that contains active work. Rename only a workspace whose identity and ownership
+you have confirmed; never select or close one based solely on its display label
+or numeric workspace ID.
+
+When upgrading from a launcher that used `hremote-<session>` or the bare session
+name, rename the confirmed active project workspace once to the new managed
+label. Do not let the launcher create a fresh empty workspace when the goal is
+to preserve an existing terminal history.
+
 ## Clean rollback
 
 Remove the exact installed launcher and only the generated default/profile
