@@ -201,6 +201,8 @@ ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" true >/dev/null \
 SYNC_LIFECYCLE_ENABLED=false
 SYNC_CLEANUP_STARTED=false
 
+# ShellCheck cannot resolve this function's indirect invocation through trap.
+# shellcheck disable=SC2317
 cleanup_sync_lifecycle() {
   [[ $SYNC_LIFECYCLE_ENABLED == true && $SYNC_CLEANUP_STARTED == false ]] || return 0
   SYNC_CLEANUP_STARTED=true
