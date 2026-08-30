@@ -60,10 +60,16 @@ would discard unsynchronized work.
 
 ## Synchronization is paused or stale
 
-The launcher resumes the configured session and runs `mutagen sync flush`. If
-that fails, inspect the session for endpoint connectivity, permissions, ignored
-paths, non-portable symlinks, or conflicts. Large first synchronizations may take
-substantially longer than later flushes.
+Paused is the expected idle state after `hremote` exits. The launcher resumes the
+selected session and runs `mutagen sync flush` on entry, then final-flushes and
+pauses it on every exit path. If resume or flush fails, inspect the session for
+endpoint connectivity, permissions, ignored paths, non-portable symlinks, or
+conflicts. Large first synchronizations may take substantially longer than later
+flushes.
+
+The daemon stops only when every Mutagen session is paused. If another profile
+or unrelated synchronization remains active, `hremote` pauses only its selected
+session and leaves the shared daemon running.
 
 If `mutagen sync list --long <sync-name>` reports that it cannot walk to the
 transition root parent, create the configured remote parent directory and flush

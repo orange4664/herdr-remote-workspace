@@ -33,6 +33,8 @@ bin_dir=$home_dir/bin
 config_file=$home_dir/config/hremote.conf
 log_file=$TEST_ROOT/commands.log
 mkdir -p "$project_dir" "$second_project_dir" "$stub_dir" "$home_dir" "$TEST_ROOT/state"
+: >"$TEST_ROOT/state/example-sync-paused"
+: >"$TEST_ROOT/state/second-sync-paused"
 
 for command_name in ssh herdr; do
   sed "s|COMMAND_NAME|$command_name|g" >"$stub_dir/$command_name" <<'STUB'
@@ -114,6 +116,8 @@ if [[ COMMAND_NAME == ssh ]]; then
   cat >/dev/null || true
 elif [[ COMMAND_NAME == herdr && " $* " == *" --version "* ]]; then
   printf 'herdr 0.8.0-test\n'
+elif [[ COMMAND_NAME == herdr && " $* " == *" --remote "* ]]; then
+  exit "${HREMOTE_TEST_HERDR_EXIT:-0}"
 fi
 exit 0
 STUB
@@ -135,25 +139,34 @@ if [[ $1 == sync && $2 == list ]]; then
       printf '[{"name":"second-sync","mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin"]},"alpha":{"protocol":"local","path":"/wrong/project"},"beta":{"protocol":"ssh","host":"second-host","path":"~/work/second"}}]\n'
       ;;
     second-match)
-      printf '[{"name":"second-sync","paused":false,"mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin"]},"alpha":{"protocol":"local","path":"%s","connected":true,"scanned":true},"beta":{"protocol":"ssh","host":"second-host","path":"~/work/second","connected":true,"scanned":true}}]\n' "${HREMOTE_TEST_PROJECT:?}"
+      paused=false
+      connected=true
+      [[ ! -f ${HREMOTE_FAKE_STATE:?}/second-sync-paused ]] || { paused=true; connected=false; }
+      printf '[{"name":"second-sync","paused":%s,"mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin"]},"alpha":{"protocol":"local","path":"%s","connected":%s,"scanned":%s},"beta":{"protocol":"ssh","host":"second-host","path":"~/work/second","connected":%s,"scanned":%s}}]\n' \
+        "$paused" "${HREMOTE_TEST_PROJECT:?}" "$connected" "$connected" "$connected" "$connected"
       ;;
     match)
-      paused=true
-      connected=false
-      scanned=false
-      if [[ -f ${HREMOTE_FAKE_STATE:?}/session-resumed ]]; then
-        paused=false
-        connected=true
-        scanned=true
-      fi
-      printf '[{"name":"unrelated","alpha":{"path":"/other"}},{"name":"example-sync","paused":%s,"mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin","build-cache","docs/current"]},"alpha":{"protocol":"local","path":"%s","connected":%s,"scanned":%s},"beta":{"protocol":"ssh","host":"example-host","path":"~/work/example","connected":%s,"scanned":%s}}]\n' \
-        "$paused" "${HREMOTE_TEST_PROJECT:?}" "$connected" "$scanned" "$connected" "$scanned"
+      paused=false
+      connected=true
+      [[ ! -f ${HREMOTE_FAKE_STATE:?}/example-sync-paused ]] || { paused=true; connected=false; }
+      unrelated_paused=true
+      [[ ${HREMOTE_TEST_UNMANAGED_ACTIVE:-} != 1 ]] || unrelated_paused=false
+      printf '[{"name":"unrelated","paused":%s,"alpha":{"path":"/other"}},{"name":"example-sync","paused":%s,"mode":"two-way-safe","symlink":{"mode":"portable"},"ignore":{"vcs":true,"paths":[".DS_Store",".venv",".tmpbin","build-cache","docs/current"]},"alpha":{"protocol":"local","path":"%s","connected":%s,"scanned":%s},"beta":{"protocol":"ssh","host":"example-host","path":"~/work/example","connected":%s,"scanned":%s}}]\n' \
+        "$unrelated_paused" "$paused" "${HREMOTE_TEST_PROJECT:?}" "$connected" "$connected" "$connected" "$connected"
       ;;
   esac
   exit 0
 fi
 if [[ $1 == sync && $2 == resume ]]; then
-  : >"${HREMOTE_FAKE_STATE:?}/session-resumed"
+  rm -f "${HREMOTE_FAKE_STATE:?}/$3-paused"
+  exit 0
+fi
+if [[ $1 == sync && $2 == pause ]]; then
+  : >"${HREMOTE_FAKE_STATE:?}/$3-paused"
+  exit 0
+fi
+if [[ $1 == daemon && $2 == stop ]]; then
+  : >"${HREMOTE_FAKE_STATE:?}/daemon-stopped"
   exit 0
 fi
 exit 0
@@ -485,6 +498,9 @@ if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
   fail 'launcher failed while resuming a matching Mutagen session'
 fi
 grep -Fq 'mutagen sync resume example-sync' "$log_file" || fail 'launcher did not resume a matching Mutagen session'
+grep -Fq 'mutagen sync flush example-sync' "$log_file" || fail 'launcher did not perform the final Mutagen flush'
+grep -Fq 'mutagen sync pause example-sync' "$log_file" || fail 'launcher did not pause synchronization on exit'
+grep -Fq 'mutagen daemon stop' "$log_file" || fail 'launcher did not stop an otherwise idle Mutagen daemon'
 grep -Fq 'status server --json' "$log_file" || fail 'launcher did not inspect structured server status'
 grep -Fq 'pane list --workspace w1' "$log_file" || fail 'launcher did not verify workspace cwd'
 if grep -Fq 'herdr --remote' "$log_file"; then
@@ -493,6 +509,32 @@ fi
 if grep -Fq 'mutagen sync create' "$log_file"; then
   fail 'launcher recreated a matching Mutagen session'
 fi
+
+: >"$log_file"
+if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_TEST_SESSION=match \
+  HREMOTE_TEST_HERDR_INSTALLED=1 HREMOTE_FAKE_STATE="$TEST_ROOT/state" \
+  HREMOTE_TEST_UNMANAGED_ACTIVE=1 HREMOTE_CONFIG="$config_file" \
+  "$bin_dir/hremote" --session example-session --setup-only >/dev/null 2>&1; then
+  fail 'launcher failed while another Mutagen session was active'
+fi
+grep -Fq 'mutagen sync pause example-sync' "$log_file" || fail 'launcher did not pause its own session'
+if grep -Fq 'mutagen daemon stop' "$log_file"; then
+  fail 'launcher stopped the daemon while another Mutagen session was active'
+fi
+
+: >"$log_file"
+if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
+  HREMOTE_TEST_PROJECT="$project_dir" HREMOTE_TEST_SESSION=match \
+  HREMOTE_TEST_HERDR_INSTALLED=1 HREMOTE_FAKE_STATE="$TEST_ROOT/state" \
+  HREMOTE_TEST_HERDR_EXIT=7 HREMOTE_CONFIG="$config_file" \
+  "$bin_dir/hremote" --session example-session >/dev/null 2>&1; then
+  fail 'launcher hid a nonzero Herdr client exit'
+else
+  herdr_status=$?
+fi
+[[ $herdr_status == 7 ]] || fail "launcher returned $herdr_status instead of the Herdr client status"
+grep -Fq 'mutagen sync pause example-sync' "$log_file" || fail 'launcher skipped cleanup after a Herdr client failure'
 
 : >"$log_file"
 if HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
@@ -530,5 +572,6 @@ if ! HOME="$home_dir" PATH="$TEST_PATH" HREMOTE_TEST_LOG="$log_file" \
 fi
 grep -Fq 'pane list --workspace w2' "$log_file" || fail 'second profile did not select its sync-specific managed workspace'
 grep -Fq 'workspace focus w2' "$log_file" || fail 'second profile did not focus its managed workspace'
+grep -Fq 'mutagen sync pause second-sync' "$log_file" || fail 'second profile did not pause its synchronization on exit'
 
 printf 'Behavior tests passed.\n'

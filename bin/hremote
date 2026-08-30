@@ -198,6 +198,43 @@ fi
 ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" true >/dev/null \
   || die 'key-only SSH validation failed'
 
+SYNC_LIFECYCLE_ENABLED=false
+SYNC_CLEANUP_STARTED=false
+
+cleanup_sync_lifecycle() {
+  [[ $SYNC_LIFECYCLE_ENABLED == true && $SYNC_CLEANUP_STARTED == false ]] || return 0
+  SYNC_CLEANUP_STARTED=true
+
+  printf 'hremote: finishing synchronization and closing Mutagen connections...\n' >&2
+  mutagen sync flush "$SYNC_NAME" >/dev/null 2>&1 \
+    || printf 'hremote: warning: final Mutagen flush failed\n' >&2
+  mutagen sync pause "$SYNC_NAME" >/dev/null 2>&1 \
+    || printf 'hremote: warning: unable to pause the Mutagen session\n' >&2
+
+  local cleanup_json all_paused
+  if cleanup_json=$(mutagen sync list --template '{{ json . }}' 2>/dev/null) \
+      && all_paused=$(printf '%s' "$cleanup_json" | python3 -c '
+import json, sys
+sessions = json.load(sys.stdin)
+if not isinstance(sessions, list):
+    raise SystemExit(1)
+print("yes" if all(isinstance(item, dict) and item.get("paused") is True for item in sessions) else "no")
+'); then
+    if [[ $all_paused == yes ]]; then
+      mutagen daemon stop >/dev/null 2>&1 \
+        || printf 'hremote: warning: unable to stop the Mutagen daemon\n' >&2
+    fi
+  else
+    printf 'hremote: warning: unable to verify whether other Mutagen sessions are active\n' >&2
+  fi
+}
+
+trap cleanup_sync_lifecycle EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+SYNC_LIFECYCLE_ENABLED=true
+
 inspect_sync() {
   local session_json=$1
   local require_healthy=$2
@@ -376,7 +413,11 @@ done
 if ! ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'command -v herdr >/dev/null || test -x "$HOME/.local/bin/herdr"'; then
   printf 'Remote Herdr is not bootstrapped yet. The interactive attach will install the matching remote component.\n' >&2
   printf 'Exit after bootstrap, then rerun hremote with the same --session NAME to create the project workspace.\n' >&2
-  exec herdr --remote "$SSH_TARGET" --session "$SELECTED_HERDR_SESSION"
+  if herdr --remote "$SSH_TARGET" --session "$SELECTED_HERDR_SESSION"; then
+    exit 0
+  else
+    exit $?
+  fi
 fi
 
 remote_herdr_command() {
@@ -499,4 +540,8 @@ if [[ $SETUP_ONLY == true ]]; then
   exit 0
 fi
 
-exec herdr --remote "$SSH_TARGET" --session "$SELECTED_HERDR_SESSION"
+if herdr --remote "$SSH_TARGET" --session "$SELECTED_HERDR_SESSION"; then
+  exit 0
+else
+  exit $?
+fi

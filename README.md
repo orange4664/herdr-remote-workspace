@@ -95,6 +95,13 @@ Then run `hremote --session project-session`. It performs these steps in order:
 6. starts or reuses the named remote Herdr server, creates or focuses the
    project workspace, and attaches the local thin client. The managed workspace
    label is `hremote-<session>-<sync-name>`.
+7. when the client exits, the terminal closes, setup finishes, or a later step
+   fails, performs a best-effort final flush and pauses the selected Mutagen
+   session. It stops the Mutagen daemon only when no other session is active.
+
+Mutagen session metadata and both synchronized directory trees persist, but the
+watcher and its SSH connection are active only while `hremote` is running. The
+remote Herdr server and panes remain running after the local client exits.
 
 On the first run, Herdr may need an interactive attach to bootstrap its matching
 remote component. Exit after bootstrap and run
@@ -145,6 +152,9 @@ To configure and validate everything without opening the TUI, run:
 ```bash
 hremote --session project-session --setup-only
 ```
+
+`--setup-only` uses the same lifecycle: it resumes and validates the selected
+sync, then final-flushes and pauses it before returning.
 
 Mutagen preserves ordinary large files because synchronization is independent
 of Git object limits. Git remains the source-history and formal-commit workflow.
