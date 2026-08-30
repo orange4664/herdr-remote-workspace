@@ -197,7 +197,8 @@ separately after confirming its name.
 
 ## Development checks
 
-Run the local test suite before publishing changes:
+This repository does not use hosted CI. Run the local test suite before
+publishing changes:
 
 ```bash
 ./scripts/check.sh
